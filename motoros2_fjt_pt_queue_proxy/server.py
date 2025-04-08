@@ -218,6 +218,15 @@ class PointQueueProxy:
         # to a queue request, then send it off. If not success, repeat until
         # we've reached our time-out value.
         while rclpy.ok() and (points_sent < len(points)):
+            # Check for cancellation
+            if self._action_server.is_cancel_requested():
+                error_string = "Cancel requested"
+                self._logger.error(error_string)
+                return FollowJointTrajectory.Result(
+                    # TODO: use MotoROS2 error reporting method
+                    error_code=FollowJointTrajectory.Result.INVALID_GOAL,
+                    error_string=error_string)
+
             self._logger.debug(f"attempting to queue pt {points_sent}")
 
             # TODO: check whether goal has been cancelled in the meantime

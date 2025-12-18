@@ -163,136 +163,143 @@ class PointQueueProxy:
 
     def _joint_distance(self, d0: dict[str, float], d1: dict[str, float]) -> float:
         # assumptions: d1 contains all keys d0 contains
-        assert d0.keys() <= d1.keys()
+        if not d0.keys() <= d1.keys():
+            raise RuntimeError(f'Trajectory joint names {d0.keys()} are not a subset of the joint state message joint names {d1.keys()}.')
         return math.fsum([abs(val - d1[name]) for name, val in d0.items()])
 
 
     def fjt_goal_callback(self, goal):
-        self._logger.debug('fjt callback: entry')
+        try:
+            self._logger.debug('fjt callback: entry')
 
-        traj = goal.trajectory
-        points = traj.points
-        points_sent: int = 0
+            traj = goal.trajectory
+            points = traj.points
+            points_sent: int = 0
 
-        self._logger.debug(f"received goal with {len(points)} traj pts")
+            self._logger.debug(f"received goal with {len(points)} traj pts")
 
-        # checks
-        # TODO: add locking (if needed)
-        if not self._latest_jstates:
-            error_string = "waiting for (initial) feedback from controller"
-            self._logger.error(error_string)
-            return FollowJointTrajectory.Result(
-                error_code=FollowJointTrajectory.Result.INVALID_GOAL,
-                error_string=error_string)
-
-        if len(points) == 0:
-            # TODO: implement motoman_driver/industrial_robot_client behaviour
-            # (ie: cancel any executing trajectory)
-            error_string = "not executing an empty trajectory"
-            self._logger.warning(error_string)
-            return FollowJointTrajectory.Result(
-                error_code=FollowJointTrajectory.Result.SUCCESSFUL,
-                error_string=error_string)
-
-        if len(traj.joint_names) == 0:
-            error_string = "no joint names, can't continue"
-            self._logger.error(error_string)
-            return FollowJointTrajectory.Result(
-                error_code=FollowJointTrajectory.Result.INVALID_JOINTS,
-                error_string=error_string)
-
-        # arbitrary, but there aren't (m)any Motoman robots with less than
-        # four joints, especially not ones supported by MotoROS2
-        if len(traj.joint_names) < 4:
-            self._logger.warning("less than 4 joint names")
-
-        # TODO: we could/should also check whether joint names in the goal
-        # correspond to the MotoROS2 configured joint names, but we have no
-        # way of accessing MotoROS2's configuration at the moment.
-        # (could potentially sample 'joint_states' topic and use those names)
-
-        # we're going to process the goal, so relay JointStates published
-        # by MotoROS2 as FollowJointTrajectory_Feedback
-
-        # iterate over all points, starting with the first. Convert each point
-        # to a queue request, then send it off. If not success, repeat until
-        # we've reached our time-out value.
-        while rclpy.ok() and (points_sent < len(points)):
-            self._logger.debug(f"attempting to queue pt {points_sent}")
-
-            # TODO: check whether goal has been cancelled in the meantime
-            # TODO: check whether js watchdog has bitten and cancel/abort goal ourselves
-
-            pt = points[points_sent]
-            result = self._queue_point(
-                joint_names=traj.joint_names, pt=pt, max_retries=self._max_retries)
-
-            # if this is an error, or still BUSY, something is wrong. Abort
-            # the goal and report error
-            if result != QueueResultEnum.SUCCESS:
-                error_string = (f"failed to queue pt {points_sent}, aborting goal "
-                                f"(queue server reported: {result})")
+            # checks
+            # TODO: add locking (if needed)
+            if not self._latest_jstates:
+                error_string = "waiting for (initial) feedback from controller"
                 self._logger.error(error_string)
                 return FollowJointTrajectory.Result(
-                    # TODO: use MotoROS2 error reporting method
                     error_code=FollowJointTrajectory.Result.INVALID_GOAL,
                     error_string=error_string)
 
-            self._logger.info(f"pt {points_sent} queued")
+            if len(points) == 0:
+                # TODO: implement motoman_driver/industrial_robot_client behaviour
+                # (ie: cancel any executing trajectory)
+                error_string = "not executing an empty trajectory"
+                self._logger.warning(error_string)
+                return FollowJointTrajectory.Result(
+                    error_code=FollowJointTrajectory.Result.SUCCESSFUL,
+                    error_string=error_string)
 
-            # next pt
-            points_sent += 1
+            if len(traj.joint_names) == 0:
+                error_string = "no joint names, can't continue"
+                self._logger.error(error_string)
+                return FollowJointTrajectory.Result(
+                    error_code=FollowJointTrajectory.Result.INVALID_JOINTS,
+                    error_string=error_string)
 
-        # done
-        self._logger.info("queued all points")
+            # arbitrary, but there aren't (m)any Motoman robots with less than
+            # four joints, especially not ones supported by MotoROS2
+            if len(traj.joint_names) < 4:
+                self._logger.warning("less than 4 joint names")
 
-        # now we wait until MotoROS2 reports it has reached the final traj pt.
-        # We do that by comparing the current JointStates against the final
-        # trajectory point in the trajectory submitted as part of the goal.
-        # As soon as the distance is below the threshold, we assume the traj
-        # has completely executed
-        #
-        # NOTE: this approach suffers from the exact same problems as the
-        # FJT action server in industrial_robot_client (looping traj, etc)
-        self._logger.info(
-            "waiting for robot to reach final traj pt "
-            f"(threshold: {self._convergence_threshold} rad)")
+            # TODO: we could/should also check whether joint names in the goal
+            # correspond to the MotoROS2 configured joint names, but we have no
+            # way of accessing MotoROS2's configuration at the moment.
+            # (could potentially sample 'joint_states' topic and use those names)
 
-        # TODO: add a timeout. If JointStates haven't converged within the
-        # timeout, consider goal to have failed (regardless of whether the
-        # pts were successfully queued).
-        # Would also need to make sure to cancel any active motion
+            # we're going to process the goal, so relay JointStates published
+            # by MotoROS2 as FollowJointTrajectory_Feedback
 
-        # TODO: add locking (if needed)
-        if not self._latest_jstates:
-            self._logger.warning("Can't track progress as no joint "
-                "states received, not waiting for execution before reporting "
-                "success")
-        else:
-            last_traj_dict = dict(zip(traj.joint_names, points[-1].positions))
-            rate = self._node.create_rate(30.0)
-            while rclpy.ok():
-                # TODO: add locking (if needed)
-                js_dict = dict(zip(
-                    self._latest_jstates.name, self._latest_jstates.position))
-                dist = self._joint_distance(last_traj_dict, js_dict)
-                self._logger.debug(
-                    f"remaining distance: {dist:.4f}", throttle_duration_sec=1)
-                if dist <= self._convergence_threshold:
-                    self._logger.info(
-                        f"reached final traj pt (distance: {dist:.4f})")
-                    break
-                rate.sleep()
+            # iterate over all points, starting with the first. Convert each point
+            # to a queue request, then send it off. If not success, repeat until
+            # we've reached our time-out value.
+            while rclpy.ok() and (points_sent < len(points)):
+                self._logger.debug(f"attempting to queue pt {points_sent}")
 
-        # done executing the trajectory, so report the result
-        # TODO: result could be negative if there was an error (RobotStatus),
-        # it takes too long to reach the last traj pt, etc.
-        result = FollowJointTrajectory.Result(
-            error_code=FollowJointTrajectory.Result.SUCCESSFUL,
-            error_string="")
+                # TODO: check whether goal has been cancelled in the meantime
+                # TODO: check whether js watchdog has bitten and cancel/abort goal ourselves
 
-        self._logger.debug('fjt callback: exit')
-        return result
+                pt = points[points_sent]
+                result = self._queue_point(
+                    joint_names=traj.joint_names, pt=pt, max_retries=self._max_retries)
+
+                # if this is an error, or still BUSY, something is wrong. Abort
+                # the goal and report error
+                if result != QueueResultEnum.SUCCESS:
+                    error_string = (f"failed to queue pt {points_sent}, aborting goal "
+                                    f"(queue server reported: {result})")
+                    self._logger.error(error_string)
+                    return FollowJointTrajectory.Result(
+                        # TODO: use MotoROS2 error reporting method
+                        error_code=FollowJointTrajectory.Result.INVALID_GOAL,
+                        error_string=error_string)
+
+                self._logger.info(f"pt {points_sent} queued")
+
+                # next pt
+                points_sent += 1
+
+            # done
+            self._logger.info("queued all points")
+
+            # now we wait until MotoROS2 reports it has reached the final traj pt.
+            # We do that by comparing the current JointStates against the final
+            # trajectory point in the trajectory submitted as part of the goal.
+            # As soon as the distance is below the threshold, we assume the traj
+            # has completely executed
+            #
+            # NOTE: this approach suffers from the exact same problems as the
+            # FJT action server in industrial_robot_client (looping traj, etc)
+            self._logger.info(
+                "waiting for robot to reach final traj pt "
+                f"(threshold: {self._convergence_threshold} rad)")
+
+            # TODO: add a timeout. If JointStates haven't converged within the
+            # timeout, consider goal to have failed (regardless of whether the
+            # pts were successfully queued).
+            # Would also need to make sure to cancel any active motion
+
+            # TODO: add locking (if needed)
+            if not self._latest_jstates:
+                self._logger.warning("Can't track progress as no joint "
+                    "states received, not waiting for execution before reporting "
+                    "success")
+            else:
+                last_traj_dict = dict(zip(traj.joint_names, points[-1].positions))
+                rate = self._node.create_rate(30.0)
+                while rclpy.ok():
+                    # TODO: add locking (if needed)
+                    js_dict = dict(zip(
+                        self._latest_jstates.name, self._latest_jstates.position))
+                    dist = self._joint_distance(last_traj_dict, js_dict)
+                    self._logger.debug(
+                        f"remaining distance: {dist:.4f}", throttle_duration_sec=1)
+                    if dist <= self._convergence_threshold:
+                        self._logger.info(
+                            f"reached final traj pt (distance: {dist:.4f})")
+                        break
+                    rate.sleep()
+
+            # done executing the trajectory, so report the result
+            # TODO: result could be negative if there was an error (RobotStatus),
+            # it takes too long to reach the last traj pt, etc.
+            result = FollowJointTrajectory.Result(
+                error_code=FollowJointTrajectory.Result.SUCCESSFUL,
+                error_string="")
+
+            self._logger.debug('fjt callback: exit')
+            return result
+
+        except Exception as e:
+            return FollowJointTrajectory.Result(
+                error_code=FollowJointTrajectory.Result.INVALID_GOAL,
+                error_string=str(e))
 
 
 def main():

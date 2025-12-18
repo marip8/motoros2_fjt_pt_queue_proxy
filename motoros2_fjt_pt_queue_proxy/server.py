@@ -163,7 +163,7 @@ class PointQueueProxy:
 
     def _joint_distance(self, d0: dict[str, float], d1: dict[str, float]) -> float:
         # assumptions: d1 contains all keys d0 contains
-        assert len(d0) == len(d1)
+        assert d0.keys() <= d1.keys()
         return math.fsum([abs(val - d1[name]) for name, val in d0.items()])
 
 
